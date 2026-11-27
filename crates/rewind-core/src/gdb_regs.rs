@@ -15,6 +15,11 @@
 
 use std::num::NonZeroUsize;
 
+#[cfg(target_arch = "aarch64")]
+pub use gdbstub_arch::aarch64::AArch64;
+#[cfg(target_arch = "aarch64")]
+pub use gdbstub_arch::aarch64::reg::AArch64CoreRegs;
+
 use gdbstub::arch::{Arch, RegId, Registers};
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
 use gdbstub_arch::x86::reg::id::X86_64CoreRegId;

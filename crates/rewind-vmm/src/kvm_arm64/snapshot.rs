@@ -345,6 +345,8 @@ impl Machine {
         self.dev.stop = None;
         self.dev.idle = false;
         self.dev.timer_armed_at = None;
+        self.passing_breakpoint = false;
+        self.watching_step = None;
         self.work_base = d.branches;
         Ok(())
     }

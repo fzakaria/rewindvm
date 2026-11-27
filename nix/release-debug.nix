@@ -18,7 +18,7 @@ pkgs.runCommand "rewind-debug-release"
     nativeBuildInputs = [ pkgs.llvm ];
   }
   ''
-    dir=rewind-debug-x86_64-linux
+    dir=rewind-debug-${pkgs.stdenv.hostPlatform.system}
     mkdir -p $dir/lib $dir/src/overlay
     cp -r ${kernel.debug}/lib/debug $dir/lib/
 

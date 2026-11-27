@@ -2,6 +2,7 @@
 //! page-table walker used by both macOS Hypervisor.framework and Linux ARM64 KVM.
 
 pub mod boot;
+pub mod debug;
 pub mod fdt;
 pub mod layout;
 pub mod pagetable;

@@ -545,9 +545,21 @@ mod tests {
             fake.put_u64(stack + l.pt_regs + 8 * word as u64, 100 + word as u64);
         }
         let regs = Tasks::new(&fake, l).user_registers(t41).unwrap();
-        assert_eq!(regs[pt_regs::R15], 100);
-        assert_eq!(regs[pt_regs::RIP], 100 + pt_regs::RIP as u64);
-        assert_eq!(regs[pt_regs::SS], 100 + pt_regs::SS as u64);
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert_eq!(regs[pt_regs::R15], 100);
+            assert_eq!(regs[pt_regs::RIP], 100 + pt_regs::RIP as u64);
+            assert_eq!(regs[pt_regs::SS], 100 + pt_regs::SS as u64);
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            assert_eq!(regs[pt_regs::X0], 100);
+            assert_eq!(regs[pt_regs::PC], 100 + pt_regs::PC as u64);
+            assert_eq!(
+                regs[pt_regs::SYSCALLNO_PMR],
+                100 + pt_regs::SYSCALLNO_PMR as u64
+            );
+        }
     }
 
     /// The address of a word of a thread's saved user registers is the

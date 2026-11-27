@@ -13,6 +13,10 @@ use kvm_bindings::{
 use kvm_ioctls::{Cap, Kvm, VcpuExit, VcpuFd, VmFd};
 
 use crate::arm64::boot::{self, BootSpec};
+use crate::arm64::debug::{
+    DebugStop, EC_BRK64, EC_HW_BP_LOWER, EC_SW_STEP_LOWER, EC_WATCHPOINT_LOWER, Stepping, TrapSet,
+    match_watchpoints,
+};
 use crate::arm64::layout::*;
 use crate::kvm_arm64::cpu;
 use crate::memory::Mapping;
@@ -65,6 +69,9 @@ pub struct Machine {
     pub profile: Option<std::collections::HashMap<(u16, u64), u64>>,
     pub pmu: Option<(crate::pmu::Counter, u64)>,
     pub(crate) work_base: u64,
+    pub(crate) debugging: Option<crate::debug::Debugging>,
+    pub(crate) passing_breakpoint: bool,
+    pub(crate) watching_step: Option<(u64, TrapSet)>,
     pub(crate) int3s: crate::debug::Int3s,
     pub(crate) deadline: Option<crate::Deadline>,
     pub(crate) last_exit: std::time::Instant,
@@ -214,6 +221,9 @@ impl Machine {
             profile: None,
             pmu: None,
             work_base: 0,
+            debugging: None,
+            passing_breakpoint: false,
+            watching_step: None,
             int3s: crate::debug::Int3s::default(),
             deadline: None,
             last_exit: std::time::Instant::now(),
@@ -458,6 +468,72 @@ impl Machine {
                         Some(MMIO_PORT)
                     }
                 }
+                VcpuExit::Debug(dbg) => {
+                    let hsr = (u64::from(dbg.hsr_high) << 32) | u64::from(dbg.hsr);
+                    let ec = (hsr >> 26) & 0x3f;
+                    match ec {
+                        EC_HW_BP_LOWER => {
+                            let pc = cpu::get_u64(&self.vcpu, cpu::REG_PC)?;
+                            return Ok(Outcome::Debug(DebugStop::Breakpoint(pc)));
+                        }
+                        EC_BRK64 => {
+                            let pc = cpu::get_u64(&self.vcpu, cpu::REG_PC)?;
+                            let ours = self.translate(pc)?.is_some_and(|(pa, _)| {
+                                self.int3s.replaced.contains_key(&pa)
+                                    && self.int3s.lifted != Some(pa)
+                            });
+                            if ours {
+                                return Ok(Outcome::Debug(DebugStop::Breakpoint(pc)));
+                            }
+                            self.reinject_brk_el1(hsr)?;
+                            None
+                        }
+                        EC_WATCHPOINT_LOWER => {
+                            let far = dbg.far;
+                            let traps = self.debugging.as_ref().map_or(&[][..], |d| &d.traps);
+                            let (address, hit_set) = match_watchpoints(far, traps)
+                                .unwrap_or_else(|| (far, TrapSet::default()));
+                            // ARM64 watchpoints abort before the access commits; step the
+                            // watched instruction once so the store lands and PC advances.
+                            self.watching_step = Some((address, hit_set));
+                            self.apply_guest_debug()?;
+                            None
+                        }
+                        EC_SW_STEP_LOWER => {
+                            if self.passing_breakpoint {
+                                self.finish_pass_breakpoint()?;
+                                if self
+                                    .debugging
+                                    .as_ref()
+                                    .is_some_and(|d| d.stepping == Stepping::Yes)
+                                {
+                                    return Ok(Outcome::Debug(DebugStop::Step));
+                                }
+                                None
+                            } else if let Some((address, traps)) = self.watching_step.take() {
+                                self.apply_guest_debug()?;
+                                return Ok(Outcome::Debug(DebugStop::Watchpoint { address, traps }));
+                            } else if self
+                                .debugging
+                                .as_ref()
+                                .is_some_and(|d| d.stepping == Stepping::Yes)
+                            {
+                                return Ok(Outcome::Debug(DebugStop::Step));
+                            } else {
+                                None
+                            }
+                        }
+                        other => {
+                            let pc = cpu::get_u64(&self.vcpu, cpu::REG_PC)?;
+                            bail!(
+                                "unexpected ARM64 KVM debug exit EC={other:#x} HSR={hsr:#x} \
+                                 FAR={:#x} PC={pc:#x} at step {}",
+                                dbg.far,
+                                self.dev.step
+                            );
+                        }
+                    }
+                }
                 VcpuExit::SystemEvent(kind, _flags) => {
                     // KVM_SYSTEM_EVENT_SHUTDOWN = 1, KVM_SYSTEM_EVENT_RESET = 2.
                     let guest_exit = if kind == 2 {
@@ -492,6 +568,29 @@ impl Machine {
             }
             self.after_step()?;
             self.dev.write_event(obs);
+
+            if self.passing_breakpoint {
+                self.complete_pending_exit()?;
+                self.finish_pass_breakpoint()?;
+                if self
+                    .debugging
+                    .as_ref()
+                    .is_some_and(|d| d.stepping == Stepping::Yes)
+                {
+                    return Ok(Outcome::Debug(DebugStop::Step));
+                }
+            } else if let Some((address, traps)) = self.watching_step.take() {
+                self.complete_pending_exit()?;
+                self.apply_guest_debug()?;
+                return Ok(Outcome::Debug(DebugStop::Watchpoint { address, traps }));
+            } else if self
+                .debugging
+                .as_ref()
+                .is_some_and(|d| d.stepping == Stepping::Yes)
+            {
+                self.complete_pending_exit()?;
+                return Ok(Outcome::Debug(DebugStop::Step));
+            }
 
             if until.is_some_and(|u| self.dev.step >= u) || obs.stop() {
                 return Ok(Outcome::Paused);
@@ -742,5 +841,109 @@ mod tests {
         m.complete_pending_exit().unwrap();
         let (cpu_state, irqchips, devices) = m.state().unwrap();
         m.apply_state(&cpu_state, &irqchips, &devices).unwrap();
+    }
+
+    #[test]
+    fn arm64_kvm_hardware_and_software_debugging() {
+        use crate::debug::{Access, DebugStop, Stepping, Trap};
+
+        if crate::kvm_arm64::kvm::open().is_err() {
+            eprintln!("skipped: /dev/kvm does not open");
+            return;
+        }
+        let mut m = Machine::create(&test_config(), DirtyLog::On).unwrap();
+        // ARM64 program at RAM_BASE + 0x20000:
+        //  +0x00: movz x1, #0x4000, lsl #16   ; x1 = RAM_BASE
+        //  +0x04: add  x1, x1, #2, lsl #12    ; x1 = RAM_BASE + 0x2000 (watched addr)
+        //  +0x08: movz x2, #0x55              ; <-- HW breakpoint
+        //  +0x0c: str  x2, [x1]               ; <-- HW write watchpoint (writes 0x55)
+        //  +0x10: movz x3, #0x0900, lsl #16   ; <-- SW BRK #0 breakpoint
+        //  +0x14: movz x0, #'K'
+        //  +0x18: str  x0, [x3, #0x38]        ; MMIO_SERIAL
+        //  +0x1c: movz x0, #0
+        //  +0x20: str  x0, [x3, #0x20]        ; MMIO_EXIT (PowerOff)
+        let code: [u32; 9] = [
+            0xd2a8_0001,
+            0x9140_0821,
+            0xd280_0aa2,
+            0xf900_0022,
+            0xd2a1_2003,
+            0xd280_0960,
+            0xf900_1c60,
+            0xd280_0000,
+            0xf900_1060,
+        ];
+        let entry_off = 0x20000u64;
+        let entry_pc = RAM_BASE + entry_off;
+        for (i, insn) in code.iter().enumerate() {
+            m.dev
+                .ram
+                .write(entry_off + (i * 4) as u64, &insn.to_le_bytes())
+                .unwrap();
+        }
+        cpu::setup_boot_vcpu(&m.vcpu, entry_pc, 0).unwrap();
+        let _ = m.drain_dirty_log().unwrap();
+
+        struct Capture(Vec<u8>);
+        impl Observer for Capture {
+            fn serial(&mut self, _step: u64, byte: u8) {
+                self.0.push(byte);
+            }
+        }
+        let mut obs = Capture(Vec::new());
+
+        // 1. Single-step two instructions.
+        m.set_debug(Stepping::Yes, &[]).unwrap();
+        assert_eq!(m.run(None, &mut obs).unwrap(), Outcome::Debug(DebugStop::Step));
+        assert_eq!(m.arm64_registers().unwrap().pc, entry_pc + 4);
+        assert_eq!(m.run(None, &mut obs).unwrap(), Outcome::Debug(DebugStop::Step));
+        assert_eq!(m.arm64_registers().unwrap().pc, entry_pc + 8);
+        assert_eq!(m.arm64_registers().unwrap().x[1], RAM_BASE + 0x2000);
+
+        // 2. HW breakpoint, HW write watchpoint, and SW BRK #0 breakpoint.
+        let watch_addr = RAM_BASE + 0x2000;
+        let sw_bp_addr = entry_pc + 0x10;
+        m.insert_int3(sw_bp_addr).unwrap();
+        let mut read_back = [0u8; 4];
+        assert_eq!(m.read_virtual(sw_bp_addr, &mut read_back).unwrap(), 4);
+        assert_eq!(read_back, code[4].to_le_bytes());
+
+        let traps = [
+            Trap::Execute(entry_pc + 8),
+            Trap::Watch {
+                address: watch_addr,
+                len: 8,
+                access: Access::Write,
+            },
+        ];
+        m.set_debug(Stepping::No, &traps).unwrap();
+        assert_eq!(
+            m.run(None, &mut obs).unwrap(),
+            Outcome::Debug(DebugStop::Breakpoint(entry_pc + 8))
+        );
+
+        m.pass_breakpoint().unwrap();
+        match m.run(None, &mut obs).unwrap() {
+            Outcome::Debug(DebugStop::Watchpoint { address, traps }) => {
+                assert_eq!(address, watch_addr);
+                assert!(traps.contains(1));
+            }
+            other => panic!("expected Watchpoint, got {other:?}"),
+        }
+        assert_eq!(m.arm64_registers().unwrap().pc, sw_bp_addr);
+        let mut mem = [0u8; 8];
+        m.read_physical(watch_addr, &mut mem).unwrap();
+        assert_eq!(u64::from_le_bytes(mem), 0x55);
+
+        assert_eq!(
+            m.run(None, &mut obs).unwrap(),
+            Outcome::Debug(DebugStop::Breakpoint(sw_bp_addr))
+        );
+        m.pass_breakpoint().unwrap();
+        assert_eq!(
+            m.run(None, &mut obs).unwrap(),
+            Outcome::Stopped(Stop::Guest(GuestExit::PowerOff))
+        );
+        assert_eq!(obs.0, b"K");
     }
 }

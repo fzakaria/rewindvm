@@ -38,7 +38,10 @@
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_os = "macos"))]
+use std::sync::atomic::AtomicUsize;
+#[cfg(not(target_os = "macos"))]
 use std::sync::mpsc;
 
 use anyhow::{Result, bail};
@@ -753,7 +756,8 @@ impl Debuggee<'_> {
                 self.machine.run(Some(step), &mut listening)?;
             }
             None => {
-                self.machine = history.machine_at(step, &mut listening)?;
+                self.machine
+                    .replace(|| history.machine_at(step, &mut listening))?;
                 self.checkpoints.clear();
             }
         }
@@ -1033,10 +1037,14 @@ impl Debuggee<'_> {
             }
 
             // Past the first window, several windows at once, when there
-            // are several left.
-            let windows = whole_windows(&keyframes, self.began, start);
-            if windows.len() > 1 {
-                return self.scan_at_once(&windows, here);
+            // are several left. macOS HVF allows only one VM per process, so
+            // scan sequentially there.
+            #[cfg(not(target_os = "macos"))]
+            {
+                let windows = whole_windows(&keyframes, self.began, start);
+                if windows.len() > 1 {
+                    return self.scan_at_once(&windows, here);
+                }
             }
             end = Some(start);
             before = start - 1;
@@ -1048,6 +1056,7 @@ impl Debuggee<'_> {
     /// last hit in the newest window that has one: what scanning them one
     /// at a time would return. A Ctrl-C heard while they run stops the
     /// fork at `here`, where the first window's scan left it.
+    #[cfg(not(target_os = "macos"))]
     fn scan_at_once(
         &mut self,
         windows: &[(u64, u64)],
@@ -1250,10 +1259,12 @@ impl Debuggee<'_> {
 
 /// How long a run back that scans several windows at once waits for one
 /// of them between looks at gdb's connection.
+#[cfg(not(target_os = "macos"))]
 const LISTEN_AT_ONCE: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// How a scan of several windows at once ended: with what it found, or
 /// with what gdb sent on the way.
+#[cfg(not(target_os = "macos"))]
 enum AtOnce {
     Found(Result<Option<(Position, GdbTrap)>>),
     Heard(Heard),
@@ -1271,6 +1282,7 @@ enum Ended {
 /// The windows of whole steps from `began` up to the start of step
 /// `before`, newest first, each from a keyframe, or from `began`, to the
 /// start of the next.
+#[cfg(any(not(target_os = "macos"), test))]
 fn whole_windows(keyframes: &[u64], began: u64, before: u64) -> Vec<(u64, u64)> {
     let mut starts: Vec<u64> = keyframes
         .iter()
@@ -1290,6 +1302,7 @@ fn whole_windows(keyframes: &[u64], began: u64, before: u64) -> Vec<(u64, u64)> 
 
 /// What a scan of a window on a machine of its own needs of the fork:
 /// gdb's traps and what decides whether a hit counts.
+#[cfg(not(target_os = "macos"))]
 struct Scanner {
     traps: super::Traps,
     process: Option<u32>,
@@ -1299,6 +1312,7 @@ struct Scanner {
     hits_of: Option<u64>,
 }
 
+#[cfg(not(target_os = "macos"))]
 impl Scanner {
     /// The last hit in the debugged process in the whole steps from the
     /// start of step `start` to the start of step `end`, replayed on a
@@ -1320,7 +1334,7 @@ impl Scanner {
             );
         }
         let mut fork = Debuggee {
-            machine,
+            machine: super::MachineSlot::new(machine),
             traps: self.traps.clone(),
             mode: super::Mode::Continue,
             stepped: None,

@@ -279,6 +279,7 @@ impl TaskLayout {
 
 /// struct pt_regs as u64s, in the order of ptrace's user_regs_struct, and
 /// where each register is among them.
+#[cfg(target_arch = "x86_64")]
 pub mod pt_regs {
     pub const WORDS: usize = 21;
     pub const R15: usize = 0;
@@ -302,6 +303,39 @@ pub mod pt_regs {
     pub const RFLAGS: usize = 18;
     pub const RSP: usize = 19;
     pub const SS: usize = 20;
+
+    /// The system call number saved on kernel entry (`orig_rax`).
+    pub fn syscall_number(words: &[u64; WORDS]) -> u64 {
+        words[ORIG_RAX]
+    }
+}
+
+/// Linux ARM64 `struct pt_regs` prefix as u64 words (`user_pt_regs` followed
+/// by `orig_x0` and `(syscallno, pmr)`).
+#[cfg(target_arch = "aarch64")]
+pub mod pt_regs {
+    pub const WORDS: usize = 36;
+    pub const X0: usize = 0;
+    pub const X8: usize = 8;
+    pub const X30: usize = 30;
+    pub const SP: usize = 31;
+    pub const PC: usize = 32;
+    /// Alias matching x86-64's `pt_regs::RIP` for shared kernel-watch helpers.
+    pub const RIP: usize = PC;
+    pub const PSTATE: usize = 33;
+    pub const ORIG_X0: usize = 34;
+    /// Low 32 bits hold signed `syscallno`, high 32 bits hold `pmr`.
+    pub const SYSCALLNO_PMR: usize = 35;
+
+    /// Extracts signed `syscallno` from `words[SYSCALLNO_PMR]`.
+    pub fn syscallno(words: &[u64; WORDS]) -> i32 {
+        words[SYSCALLNO_PMR] as u32 as i32
+    }
+
+    /// The system call number saved on kernel entry (`syscallno`).
+    pub fn syscall_number(words: &[u64; WORDS]) -> u64 {
+        syscallno(words) as u64
+    }
 }
 
 #[cfg(test)]

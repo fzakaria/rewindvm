@@ -37,9 +37,13 @@
       nixbot,
     }:
     let
-      # x86_64-linux only: the engine is a KVM virtual machine monitor, and
-      # the guest kernel's hypervisor platform is x86 code.
-      systems = [ "x86_64-linux" ];
+      # Supported host platforms: Linux KVM (x86_64 and aarch64) and macOS
+      # Apple Silicon (Hypervisor.framework).
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+      ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
 
       # The commit the packages are built from, for `rewind --version` and
@@ -66,14 +70,22 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          isLinux = pkgs.stdenv.hostPlatform.isLinux;
+          isX86Linux = system == "x86_64-linux";
           rust = import ./nix/crane.nix { inherit pkgs crane; };
           kernel = import ./nix/kernel.nix { inherit pkgs; };
           guest = import ./nix/guest.nix { inherit pkgs; };
-          nixseparatedebuginfod2 = pkgs.nixseparatedebuginfod2;
+          nixseparatedebuginfod2 = if isLinux then pkgs.nixseparatedebuginfod2 else null;
           # gdb 17 or later, which finds thread-local variables itself
-          # where `rewind gdb`'s stub lists the libraries: Hydra's build,
-          # substituted without evaluating the nixpkgs it came from.
-          gdb = multiverse.multiverse.${system}.fast.version "gdb" "17.2";
+          # where `rewind gdb`'s stub lists the libraries: Hydra's build on
+          # x86_64-linux, pkgs.gdb on aarch64-linux, and null on darwin.
+          gdb =
+            if isX86Linux then
+              multiverse.multiverse.${system}.fast.version "gdb" "17.2"
+            else if isLinux then
+              pkgs.gdb
+            else
+              null;
           rewind = import ./nix/rewind.nix {
             inherit
               pkgs
@@ -85,20 +97,26 @@
               commit
               ;
           };
-          app = import ./nix/app.nix {
-            inherit
-              pkgs
-              rust
-              rewind
-              releaseDate
-              ;
-          };
+          app =
+            if isLinux then
+              import ./nix/app.nix {
+                inherit
+                  pkgs
+                  rust
+                  rewind
+                  releaseDate
+                  ;
+              }
+            else
+              null;
           # The desktop app built for the browser, the site's viewer.
           web = import ./nix/web.nix { inherit pkgs rust releaseDate; };
         in
         {
           inherit
             pkgs
+            isLinux
+            isX86Linux
             rust
             kernel
             guest
@@ -108,29 +126,41 @@
             app
             web
             ;
-          release = import ./nix/release.nix {
-            inherit
-              pkgs
-              rust
-              kernel
-              guest
-              nixseparatedebuginfod2
-              commit
-              ;
-          };
-          releaseDebug = import ./nix/release-debug.nix { inherit pkgs kernel; };
-          appRelease = import ./nix/app-release.nix { inherit pkgs rust releaseDate; };
+          release =
+            if isLinux then
+              import ./nix/release.nix {
+                inherit
+                  pkgs
+                  rust
+                  kernel
+                  guest
+                  nixseparatedebuginfod2
+                  commit
+                  ;
+              }
+            else
+              null;
+          releaseDebug = if isLinux then import ./nix/release-debug.nix { inherit pkgs kernel; } else null;
+          appRelease =
+            if isX86Linux then
+              import ./nix/app-release.nix { inherit pkgs rust releaseDate; }
+            else
+              null;
           site = import ./nix/site.nix { inherit pkgs web; };
           examples = import ./nix/examples.nix { inherit pkgs; };
-          benchInputs = import ./nix/bench { inherit pkgs; };
-          license = import ./nix/license.nix {
-            inherit
-              pkgs
-              rust
-              app
-              releaseDate
-              ;
-          };
+          benchInputs = if isLinux then import ./nix/bench { inherit pkgs; } else null;
+          license =
+            if isLinux then
+              import ./nix/license.nix {
+                inherit
+                  pkgs
+                  rust
+                  app
+                  releaseDate
+                  ;
+              }
+            else
+              null;
         };
     in
     {
@@ -144,22 +174,11 @@
           rewind = p.rewind;
           default = p.rewind;
 
-          # the command's release asset, for people without Nix
-          # (nix/release.nix)
-          release = p.release;
-
-          # the kernel's debug symbols and sources for `rewind gdb`, a
-          # release asset next to the command's (nix/release-debug.nix)
-          release-debug = p.releaseDebug;
-
           # the guest kernel with the Rewind platform (nix/kernel.nix)
           kernel = p.kernel;
 
           # the same kernel's DWARF, by build ID, for `rewind gdb`
           kernel-debug = p.kernel.debug;
-
-          # the debuginfod server `rewind gdb` starts
-          debuginfod = p.nixseparatedebuginfod2;
 
           # the guest's init and initramfs (nix/guest.nix)
           init = p.guest.init;
@@ -171,21 +190,6 @@
           # the desktop app built for the browser, which the site serves
           # as its viewer (nix/web.nix)
           web = p.web;
-
-          # the desktop app, the scrubber over recorded runs (nix/app.nix)
-          app = p.app;
-
-          # the desktop app's release asset: a build for any distribution,
-          # with a launcher (nix/app-release.nix)
-          app-release = p.appRelease;
-
-          # the license issuer, kept out of the app's package
-          # (nix/license.nix)
-          license = p.license;
-
-          # the programs and data tools/bench.py measures every build
-          # against (nix/bench)
-          bench-inputs = p.benchInputs;
 
           # the tutorials' flaky thread pool (nix/examples.nix)
           mylib = p.examples.mylib;
@@ -228,6 +232,34 @@
           # another on every build outside Rewind (nix/examples.nix)
           stamp = p.examples.stamp;
         }
+        // nixpkgs.lib.optionalAttrs p.isLinux {
+          # the command's release asset, for people without Nix
+          # (nix/release.nix)
+          release = p.release;
+
+          # the kernel's debug symbols and sources for `rewind gdb`, a
+          # release asset next to the command's (nix/release-debug.nix)
+          release-debug = p.releaseDebug;
+
+          # the debuginfod server `rewind gdb` starts
+          debuginfod = p.nixseparatedebuginfod2;
+
+          # the desktop app, the scrubber over recorded runs (nix/app.nix)
+          app = p.app;
+
+          # the license issuer, kept out of the app's package
+          # (nix/license.nix)
+          license = p.license;
+
+          # the programs and data tools/bench.py measures every build
+          # against (nix/bench)
+          bench-inputs = p.benchInputs;
+        }
+        // nixpkgs.lib.optionalAttrs p.isX86Linux {
+          # the desktop app's release asset: a build for any distribution,
+          # with a launcher (nix/app-release.nix)
+          app-release = p.appRelease;
+        }
       );
 
       apps = forAllSystems (
@@ -241,6 +273,13 @@
             program = "${p.rewind}/bin/rewind";
           };
 
+          # `nix run .#serve [port]`: the built site on a local port
+          serve = {
+            type = "app";
+            program = "${import ./nix/serve.nix { inherit (p) pkgs site; }}/bin/serve-site";
+          };
+        }
+        // nixpkgs.lib.optionalAttrs p.isLinux {
           # `nix run .#license -- keygen | issue ...`: the license issuer
           # (nix/license.nix, crates/rewind-app/LICENSING.md)
           license = {
@@ -265,12 +304,6 @@
               }
             }/bin/rewind-bench";
           };
-
-          # `nix run .#serve [port]`: the built site on a local port
-          serve = {
-            type = "app";
-            program = "${import ./nix/serve.nix { inherit (p) pkgs site; }}/bin/serve-site";
-          };
         }
       );
 
@@ -279,21 +312,23 @@
         let
           p = per system;
         in
-        import ./nix/checks.nix {
-          inherit (p)
-            pkgs
-            rust
-            rewind
-            app
-            kernel
-            guest
-            gdb
-            site
-            ;
-          inherit releaseDate;
-          module = self.nixosModules.default;
-          rewindLib = self.lib.${system};
-        }
+        (nixpkgs.lib.optionalAttrs p.isX86Linux (
+          import ./nix/checks.nix {
+            inherit (p)
+              pkgs
+              rust
+              rewind
+              app
+              kernel
+              guest
+              gdb
+              site
+              ;
+            inherit releaseDate;
+            module = self.nixosModules.default;
+            rewindLib = self.lib.${system};
+          }
+        ))
 
         # nixbot (nixbot.decio.us) builds `checks` and nothing else, so the
         # tree's formatting and every package are checks as well: a package

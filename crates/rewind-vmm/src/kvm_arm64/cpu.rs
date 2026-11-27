@@ -4,7 +4,8 @@ use anyhow::{Context, Result, bail};
 use kvm_bindings::{
     KVM_REG_ARM_CORE, KVM_REG_ARM64, KVM_REG_ARM64_SYSREG, KVM_REG_ARM64_SYSREG_CRM_SHIFT,
     KVM_REG_ARM64_SYSREG_CRN_SHIFT, KVM_REG_ARM64_SYSREG_OP0_SHIFT,
-    KVM_REG_ARM64_SYSREG_OP1_SHIFT, KVM_REG_ARM64_SYSREG_OP2_SHIFT, KVM_REG_SIZE_U64,
+    KVM_REG_ARM64_SYSREG_OP1_SHIFT, KVM_REG_ARM64_SYSREG_OP2_SHIFT, KVM_REG_SIZE_U32,
+    KVM_REG_SIZE_U64, KVM_REG_SIZE_U128,
 };
 use kvm_ioctls::{Cap, Kvm, VcpuFd};
 
@@ -20,6 +21,16 @@ const SCTLR_EL1_RESET: u64 = 0x30c5_0830;
 /// offset inside `struct kvm_regs` (`user_pt_regs` starts at offset 0).
 pub const fn core_reg(u32_offset: u64) -> u64 {
     KVM_REG_ARM64 | KVM_REG_SIZE_U64 | (KVM_REG_ARM_CORE as u64) | u32_offset
+}
+
+/// Constructs a 32-bit `KVM_REG_ARM_CORE` register ID from its 32-bit word offset.
+pub const fn core_reg_u32(u32_offset: u64) -> u64 {
+    KVM_REG_ARM64 | KVM_REG_SIZE_U32 | (KVM_REG_ARM_CORE as u64) | u32_offset
+}
+
+/// Constructs a 128-bit `KVM_REG_ARM_CORE` register ID from its 32-bit word offset.
+pub const fn core_reg_u128(u32_offset: u64) -> u64 {
+    KVM_REG_ARM64 | KVM_REG_SIZE_U128 | (KVM_REG_ARM_CORE as u64) | u32_offset
 }
 
 /// Constructs a 64-bit `KVM_REG_ARM64_SYSREG` register ID.
@@ -38,11 +49,30 @@ pub const REG_X0: u64 = core_reg(0);
 pub const REG_SP_EL0: u64 = core_reg(62);
 pub const REG_PC: u64 = core_reg(64);
 pub const REG_PSTATE: u64 = core_reg(66);
+pub const REG_SP_EL1: u64 = core_reg((std::mem::offset_of!(kvm_bindings::kvm_regs, sp_el1) / 4) as u64);
+pub const REG_ELR_EL1: u64 =
+    core_reg((std::mem::offset_of!(kvm_bindings::kvm_regs, elr_el1) / 4) as u64);
+pub const REG_SPSR_EL1: u64 =
+    core_reg((std::mem::offset_of!(kvm_bindings::kvm_regs, spsr) / 4) as u64);
+
+const FP_REGS_U32_OFF: usize = std::mem::offset_of!(kvm_bindings::kvm_regs, fp_regs) / 4;
+pub const fn reg_v(n: usize) -> u64 {
+    core_reg_u128((FP_REGS_U32_OFF + n * 4) as u64)
+}
+pub const REG_FPSR: u64 = core_reg_u32(
+    (FP_REGS_U32_OFF + std::mem::offset_of!(kvm_bindings::user_fpsimd_state, fpsr) / 4) as u64,
+);
+pub const REG_FPCR: u64 = core_reg_u32(
+    (FP_REGS_U32_OFF + std::mem::offset_of!(kvm_bindings::user_fpsimd_state, fpcr) / 4) as u64,
+);
 
 pub const SYS_SCTLR_EL1: u64 = sys_reg(3, 0, 1, 0, 0);
 pub const SYS_TTBR0_EL1: u64 = sys_reg(3, 0, 2, 0, 0);
 pub const SYS_TTBR1_EL1: u64 = sys_reg(3, 0, 2, 0, 1);
 pub const SYS_TCR_EL1: u64 = sys_reg(3, 0, 2, 0, 2);
+pub const SYS_ESR_EL1: u64 = sys_reg(3, 0, 5, 2, 0);
+pub const SYS_VBAR_EL1: u64 = sys_reg(3, 0, 12, 0, 0);
+pub const SYS_TPIDR_EL0: u64 = sys_reg(3, 3, 13, 0, 2);
 pub const SYS_CNTKCTL_EL1: u64 = sys_reg(3, 0, 14, 1, 0);
 pub const SYS_CNTVCT_EL0: u64 = sys_reg(3, 3, 14, 0, 2);
 pub const SYS_CNTPCT_EL0: u64 = sys_reg(3, 3, 14, 0, 1);
@@ -50,6 +80,19 @@ pub const SYS_CNTV_CTL_EL0: u64 = sys_reg(3, 3, 14, 3, 1);
 pub const SYS_CNTV_CVAL_EL0: u64 = sys_reg(3, 3, 14, 3, 2);
 pub const SYS_CNTP_CTL_EL0: u64 = sys_reg(3, 3, 14, 2, 1);
 pub const SYS_CNTP_CVAL_EL0: u64 = sys_reg(3, 3, 14, 2, 2);
+
+pub fn get_u32(vcpu: &VcpuFd, id: u64) -> Result<u32> {
+    let mut buf = [0u8; 4];
+    vcpu.get_one_reg(id, &mut buf)
+        .with_context(|| format!("KVM_GET_ONE_REG u32 {id:#x}"))?;
+    Ok(u32::from_le_bytes(buf))
+}
+
+pub fn set_u32(vcpu: &VcpuFd, id: u64, val: u32) -> Result<()> {
+    vcpu.set_one_reg(id, &val.to_le_bytes())
+        .with_context(|| format!("KVM_SET_ONE_REG u32 {id:#x}"))?;
+    Ok(())
+}
 
 pub fn get_u64(vcpu: &VcpuFd, id: u64) -> Result<u64> {
     let mut buf = [0u8; 8];
@@ -61,6 +104,19 @@ pub fn get_u64(vcpu: &VcpuFd, id: u64) -> Result<u64> {
 pub fn set_u64(vcpu: &VcpuFd, id: u64, val: u64) -> Result<()> {
     vcpu.set_one_reg(id, &val.to_le_bytes())
         .with_context(|| format!("KVM_SET_ONE_REG {id:#x}"))?;
+    Ok(())
+}
+
+pub fn get_u128(vcpu: &VcpuFd, id: u64) -> Result<u128> {
+    let mut buf = [0u8; 16];
+    vcpu.get_one_reg(id, &mut buf)
+        .with_context(|| format!("KVM_GET_ONE_REG u128 {id:#x}"))?;
+    Ok(u128::from_le_bytes(buf))
+}
+
+pub fn set_u128(vcpu: &VcpuFd, id: u64, val: u128) -> Result<()> {
+    vcpu.set_one_reg(id, &val.to_le_bytes())
+        .with_context(|| format!("KVM_SET_ONE_REG u128 {id:#x}"))?;
     Ok(())
 }
 

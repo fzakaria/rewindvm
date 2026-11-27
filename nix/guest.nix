@@ -11,6 +11,12 @@
 let
   inherit (pkgs) lib;
 
+  # Guest userspace is always Linux (static musl matching the host CPU arch).
+  # On macOS Apple Silicon (`aarch64-darwin`), cross-compile against aarch64-linux-musl.
+  linuxPkgs =
+    if pkgs.stdenv.hostPlatform.isLinux then pkgs else pkgs.pkgsCross.aarch64-multiplatform;
+  staticPkgs = linuxPkgs.pkgsStatic;
+
   # The init is a workspace of its own, so nothing else in the tree
   # changes its source.
   src = lib.fileset.toSource {
@@ -27,7 +33,7 @@ let
   # dependencies' sources, so the binary, and with it the initramfs whose
   # hash is part of every run's id, would change. The init has four
   # dependencies and is rebuilt only when the init itself changes.
-  init = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+  init = staticPkgs.rustPlatform.buildRustPackage {
     pname = "rewind-init";
     version = "0.1.0";
     inherit src;
@@ -39,12 +45,12 @@ let
   # its own for the host: clippy-driver in the init's build would make a
   # new initramfs, and every recording's guest with it, whenever clippy
   # changed. The init and its four dependencies compile in seconds.
-  clippy = pkgs.rustPlatform.buildRustPackage {
+  clippy = linuxPkgs.rustPlatform.buildRustPackage {
     pname = "rewind-init-clippy";
     version = "0.1.0";
     inherit src;
     cargoLock.lockFile = ../crates/rewind-init/Cargo.lock;
-    nativeBuildInputs = [ pkgs.clippy ];
+    nativeBuildInputs = [ linuxPkgs.clippy ];
 
     # The engine's clippy.toml, which lets tests unwrap.
     CLIPPY_CONF_DIR = lib.fileset.toSource {
@@ -65,12 +71,15 @@ let
   # the same one here. The static binary is copied in rather than linked
   # to its store path, so a run needs nothing from the store beyond the
   # derivation's own inputs, and a rewind installed without Nix works.
-  sandboxShell = pkgs.busybox-sandbox-shell;
+  sandboxShell = linuxPkgs.busybox-sandbox-shell;
 
   # For `rewind shell`: a static busybox whose ash has line editing,
   # history and completion, and its applets, which stand in for tools a
   # job's PATH lacks. rewind-init's TOOLS_DIR.
-  tools = pkgs.pkgsStatic.busybox;
+  tools = staticPkgs.busybox;
+
+  # Host-runnable busybox for listing applets when cross-building initrd on darwin.
+  hostBusybox = if pkgs.stdenv.hostPlatform.isLinux then tools else pkgs.busybox;
 
   passwd = pkgs.writeText "passwd" ''
     root:x:0:0:Nix build user:/build:/noshell
@@ -97,7 +106,7 @@ let
         cp ${init}/bin/rewind-init root/init
         mkdir -p root/rewind/tools/bin
         cp ${tools}/bin/busybox root/rewind/tools/busybox
-        for applet in $(${tools}/bin/busybox --list); do
+        for applet in $(${hostBusybox}/bin/busybox --list); do
           ln -s ../busybox root/rewind/tools/bin/$applet
         done
         cp ${sandboxShell}/bin/busybox root/bin/sh

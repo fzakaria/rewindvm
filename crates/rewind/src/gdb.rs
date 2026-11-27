@@ -57,7 +57,15 @@ const DEBUG_VMLINUX: &str = "lib/debug/vmlinux";
 const DEBUG_BUILD_IDS: &str = "lib/debug/.build-id";
 
 /// The release asset with the kernel's DWARF, for hosts without Nix.
+#[cfg(target_arch = "x86_64")]
 const DEBUG_RELEASE: &str = "rewind-debug-x86_64-linux.tar.gz";
+#[cfg(target_arch = "aarch64")]
+const DEBUG_RELEASE: &str = "rewind-debug-aarch64-linux.tar.gz";
+
+#[cfg(target_arch = "x86_64")]
+const RELEASE_DIR: &str = "rewind-x86_64-linux";
+#[cfg(target_arch = "aarch64")]
+const RELEASE_DIR: &str = "rewind-aarch64-linux";
 
 /// gdb's switch for the Python scripts it loads from next to a symbol
 /// file, such as vmlinux-gdb.py next to vmlinux.
@@ -127,15 +135,21 @@ pub(crate) fn gdb(
     listen: Option<&str>,
     extra: &[String],
 ) -> Result<ExitCode> {
-    // The fork, then the thread: the one given, else the step's event's,
-    // else the one on the CPU. Finding a process that is not on the CPU
-    // takes the kernel's task list, which kernels before it do not
-    // publish.
+    // The thread and its symbols first, then the fork to debug: `Symbols::load`
+    // inspects the process on a fork of its own, so loading symbols before
+    // creating the debugged fork keeps only one VM live at a time (required on
+    // macOS Hypervisor.framework).
     let pick = crate::locate::thread_at(run.trace()?, step, start.pid, start.tid)?;
     let needs = match (start.pid, start.tid) {
         (None, None) => Needs::Nothing,
         _ => Needs::Tasks("--pid and --tid cannot find threads".into()),
     };
+    let pid = match (start.pid, start.tid, pick) {
+        (None, None, _) => None,
+        (_, _, Pick::Thread { pid, .. }) => Some(pid),
+        (_, _, Pick::OnTheCpu) => None,
+    };
+    let mut symbols = Symbols::load(home, run, step, pid, Kernel::Load, Say::Aloud, Server::Own)?;
     let machine = fork(home, run, step, needs)?;
     let thread = match pick {
         Pick::Thread { pid, tid } => Some((pid, tid)),
@@ -144,16 +158,6 @@ pub(crate) fn gdb(
             Some(OnTheCpu::WithoutMemory { .. } | OnTheCpu::Idle) | None => None,
         },
     };
-
-    // What gdb is told about the process, which takes inspections on forks
-    // of their own: the one given or the thread's, else the one the
-    // inspection finds running. A process it does not find leaves gdb
-    // debugging the kernel alone, and starting in the CPU's thread.
-    let pid = match (start.pid, start.tid) {
-        (None, None) => None,
-        _ => thread.map(|(pid, _)| pid),
-    };
-    let mut symbols = Symbols::load(home, run, step, pid, Kernel::Load, Say::Aloud, Server::Own)?;
     // gdb can run the fork backwards, by replaying the run.
     let history = rewind_core::debug::RunHistory { home, run };
     let mut debuggee =
@@ -1206,7 +1210,7 @@ impl KernelSymbols {
         if on_path(NIX_STORE_PROGRAM, std::env::var_os("PATH").as_deref()).is_none() {
             eprintln!(
                 "{} the kernel has its symbol table only; unpack {DEBUG_RELEASE} \
-                 next to rewind-x86_64-linux for its DWARF and source files",
+                 next to {RELEASE_DIR} for its DWARF and source files",
                 crate::color::stderr().prefix()
             );
         }

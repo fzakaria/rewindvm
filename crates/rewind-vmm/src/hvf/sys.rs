@@ -67,8 +67,49 @@ pub const HV_REG_FPSR: u32 = 33;
 pub const HV_REG_CPSR: u32 = 34;
 
 /// System registers (`hv_sys_reg_t`).
+pub const HV_SYS_REG_DBGBVR0_EL1: u16 = 0x8004;
+pub const HV_SYS_REG_DBGBCR0_EL1: u16 = 0x8005;
+pub const HV_SYS_REG_DBGWVR0_EL1: u16 = 0x8006;
+pub const HV_SYS_REG_DBGWCR0_EL1: u16 = 0x8007;
+pub const HV_SYS_REG_DBGBVR1_EL1: u16 = 0x800c;
+pub const HV_SYS_REG_DBGBCR1_EL1: u16 = 0x800d;
+pub const HV_SYS_REG_DBGWVR1_EL1: u16 = 0x800e;
+pub const HV_SYS_REG_DBGWCR1_EL1: u16 = 0x800f;
 pub const HV_SYS_REG_MDCCINT_EL1: u16 = 0x8010;
 pub const HV_SYS_REG_MDSCR_EL1: u16 = 0x8012;
+pub const HV_SYS_REG_DBGBVR2_EL1: u16 = 0x8014;
+pub const HV_SYS_REG_DBGBCR2_EL1: u16 = 0x8015;
+pub const HV_SYS_REG_DBGWVR2_EL1: u16 = 0x8016;
+pub const HV_SYS_REG_DBGWCR2_EL1: u16 = 0x8017;
+pub const HV_SYS_REG_DBGBVR3_EL1: u16 = 0x801c;
+pub const HV_SYS_REG_DBGBCR3_EL1: u16 = 0x801d;
+pub const HV_SYS_REG_DBGWVR3_EL1: u16 = 0x801e;
+pub const HV_SYS_REG_DBGWCR3_EL1: u16 = 0x801f;
+
+pub const HV_SYS_REG_DBGBVR: [u16; 4] = [
+    HV_SYS_REG_DBGBVR0_EL1,
+    HV_SYS_REG_DBGBVR1_EL1,
+    HV_SYS_REG_DBGBVR2_EL1,
+    HV_SYS_REG_DBGBVR3_EL1,
+];
+pub const HV_SYS_REG_DBGBCR: [u16; 4] = [
+    HV_SYS_REG_DBGBCR0_EL1,
+    HV_SYS_REG_DBGBCR1_EL1,
+    HV_SYS_REG_DBGBCR2_EL1,
+    HV_SYS_REG_DBGBCR3_EL1,
+];
+pub const HV_SYS_REG_DBGWVR: [u16; 4] = [
+    HV_SYS_REG_DBGWVR0_EL1,
+    HV_SYS_REG_DBGWVR1_EL1,
+    HV_SYS_REG_DBGWVR2_EL1,
+    HV_SYS_REG_DBGWVR3_EL1,
+];
+pub const HV_SYS_REG_DBGWCR: [u16; 4] = [
+    HV_SYS_REG_DBGWCR0_EL1,
+    HV_SYS_REG_DBGWCR1_EL1,
+    HV_SYS_REG_DBGWCR2_EL1,
+    HV_SYS_REG_DBGWCR3_EL1,
+];
 pub const HV_SYS_REG_MIDR_EL1: u16 = 0xc000;
 pub const HV_SYS_REG_MPIDR_EL1: u16 = 0xc005;
 pub const HV_SYS_REG_ID_AA64PFR0_EL1: u16 = 0xc020;

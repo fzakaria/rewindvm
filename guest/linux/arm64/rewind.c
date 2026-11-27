@@ -677,13 +677,15 @@ const struct cpumask *rewind_fold_cpus(const struct cpumask *mask)
 	return cpumask_of(0);
 }
 
+static struct task_struct *rewind_current_task = &init_task;
+
 static void __init rewind_publish_tasks(void)
 {
 	struct rewind_tasks *t = &rewind_shared.tasks;
 
 	t->init_task = (u64)&init_task;
-	t->current_task = 0;
-	t->page_offset = PAGE_OFFSET;
+	t->current_task = (u64)&rewind_current_task;
+	t->page_offset = (u64)phys_to_virt(PHYS_OFFSET) - PHYS_OFFSET;
 	t->tasks = offsetof(struct task_struct, tasks);
 	t->thread_node = offsetof(struct task_struct, thread_node);
 	t->signal = offsetof(struct task_struct, signal);
@@ -694,7 +696,7 @@ static void __init rewind_publish_tasks(void)
 	t->comm = offsetof(struct task_struct, comm);
 	t->thread_head = offsetof(struct signal_struct, thread_head);
 	t->pgd = offsetof(struct mm_struct, pgd);
-	t->pt_regs = THREAD_SIZE - sizeof(struct pt_regs);
+	t->pt_regs = (u64)task_pt_regs(&init_task) - (u64)task_stack_page(&init_task);
 	rewind_shared.fsbase = offsetof(struct task_struct, thread.uw.tp_value);
 	rewind_shared.gsbase = 0;
 }
@@ -751,6 +753,8 @@ void rewind_switch(struct task_struct *next, struct task_struct *prev)
 
 	if (!rewind_running)
 		return;
+
+	WRITE_ONCE(rewind_current_task, next);
 
 	if (prev->on_rq && !prev->se.sched_delayed)
 		flags |= REWIND_FLAG_PREV_RUNNABLE;

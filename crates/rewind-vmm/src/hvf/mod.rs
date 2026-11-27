@@ -254,6 +254,18 @@ impl HvfVcpu {
         let ret = unsafe { sys::hv_vcpu_set_vtimer_offset(self.id, offset) };
         check_hv(ret, "hv_vcpu_set_vtimer_offset")
     }
+
+    pub fn set_trap_debug_exceptions(&self, value: bool) -> Result<()> {
+        // SAFETY: valid vCPU.
+        let ret = unsafe { sys::hv_vcpu_set_trap_debug_exceptions(self.id, value) };
+        check_hv(ret, "hv_vcpu_set_trap_debug_exceptions")
+    }
+
+    pub fn set_trap_debug_reg_accesses(&self, value: bool) -> Result<()> {
+        // SAFETY: valid vCPU.
+        let ret = unsafe { sys::hv_vcpu_set_trap_debug_reg_accesses(self.id, value) };
+        check_hv(ret, "hv_vcpu_set_trap_debug_reg_accesses")
+    }
 }
 
 impl Drop for HvfVcpu {

@@ -6,6 +6,10 @@ use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result, bail};
 
+use crate::arm64::debug::{
+    DebugStop, EC_BRK64, EC_HW_BP_LOWER, EC_SW_STEP_LOWER, EC_WATCHPOINT_LOWER, MDSCR_SS,
+    PSTATE_SS, Stepping, TrapSet, match_watchpoints,
+};
 use crate::hvf::boot::{self, BootSpec};
 use crate::hvf::dirty::DirtyTracker;
 use crate::hvf::layout::*;
@@ -25,6 +29,13 @@ const EC_WFX: u64 = 0x01;
 const EC_HVC64: u64 = 0x16;
 const EC_SYS64: u64 = 0x18;
 const EC_DATA_ABORT_LOWER: u64 = 0x24;
+
+/// What one HVF exception exit means for `run_loop`.
+enum ExitAction {
+    Continue,
+    Counted(u16),
+    Debug(DebugStop),
+}
 
 /// Hypercall immediate numbers (`HVC #imm`) matching Rewind's PV ports.
 const HVC_EMIT: u16 = pv::PORT_EMIT;
@@ -66,6 +77,9 @@ pub struct Machine {
     pub profile: Option<std::collections::HashMap<(u16, u64), u64>>,
     pub pmu: Option<(crate::pmu::Counter, u64)>,
     pub(crate) work_base: u64,
+    pub(crate) debugging: Option<crate::debug::Debugging>,
+    pub(crate) passing_breakpoint: bool,
+    pub(crate) watching_step: Option<(u64, TrapSet)>,
     pub(crate) int3s: crate::debug::Int3s,
     pub(crate) deadline: Option<crate::Deadline>,
     pub(crate) last_exit: std::time::Instant,
@@ -188,6 +202,9 @@ impl Machine {
             profile: None,
             pmu: None,
             work_base: 0,
+            debugging: None,
+            passing_breakpoint: false,
+            watching_step: None,
             int3s: crate::debug::Int3s::default(),
             deadline: None,
             last_exit: std::time::Instant::now(),
@@ -333,13 +350,14 @@ impl Machine {
             // HVF clears pending interrupt level on every `hv_vcpu_run` return,
             // so re-assert the virtual IRQ before entry whenever pending.
             self.vcpu.set_pending_irq(self.irq_pending)?;
+            self.arm_single_step_if_needed()?;
 
             let exit = self.vcpu.run()?;
-            let counted = match exit.reason {
-                sys::HV_EXIT_REASON_CANCELED => None,
+            let action = match exit.reason {
+                sys::HV_EXIT_REASON_CANCELED => ExitAction::Continue,
                 sys::HV_EXIT_REASON_VTIMER_ACTIVATED => {
                     self.vcpu.set_vtimer_mask(true)?;
-                    None
+                    ExitAction::Continue
                 }
                 sys::HV_EXIT_REASON_EXCEPTION => self.handle_exception(exit.exception, obs)?,
                 other => bail!("unexpected HVF exit reason {other} at step {}", self.dev.step),
@@ -349,21 +367,45 @@ impl Machine {
                 self.dev.end_trace(stop, obs)?;
                 return Ok(Outcome::Stopped(stop));
             }
-            if counted.is_some() && self.deadline.is_some() {
+            let port = match action {
+                ExitAction::Debug(stop) => return Ok(Outcome::Debug(stop)),
+                ExitAction::Continue => {
+                    if self.interrupt.take() {
+                        return Ok(Outcome::Interrupted);
+                    }
+                    continue;
+                }
+                ExitAction::Counted(port) => port,
+            };
+            if self.deadline.is_some() {
                 self.last_exit = std::time::Instant::now();
             }
-            let Some(port) = counted else {
-                if self.interrupt.take() {
-                    return Ok(Outcome::Interrupted);
-                }
-                continue;
-            };
             if let Some(profile) = &mut self.profile {
                 let pc = self.vcpu.get_reg(sys::HV_REG_PC)?;
                 *profile.entry((port, pc)).or_default() += 1;
             }
             self.after_step()?;
             self.dev.write_event(obs);
+
+            if self.passing_breakpoint {
+                self.finish_pass_breakpoint()?;
+                if self
+                    .debugging
+                    .as_ref()
+                    .is_some_and(|d| d.stepping == Stepping::Yes)
+                {
+                    return Ok(Outcome::Debug(DebugStop::Step));
+                }
+            } else if let Some((address, traps)) = self.watching_step.take() {
+                self.apply_guest_debug()?;
+                return Ok(Outcome::Debug(DebugStop::Watchpoint { address, traps }));
+            } else if self
+                .debugging
+                .as_ref()
+                .is_some_and(|d| d.stepping == Stepping::Yes)
+            {
+                return Ok(Outcome::Debug(DebugStop::Step));
+            }
 
             if until.is_some_and(|u| self.dev.step >= u) || obs.stop() {
                 return Ok(Outcome::Paused);
@@ -375,7 +417,7 @@ impl Machine {
         &mut self,
         ex: sys::hv_vcpu_exit_exception_t,
         obs: &mut dyn Observer,
-    ) -> Result<Option<u16>> {
+    ) -> Result<ExitAction> {
         const MMIO_PORT: u16 = 0xffff;
         let ec = (ex.syndrome >> 26) & 0x3f;
         match ec {
@@ -384,7 +426,7 @@ impl Machine {
                 let imm = (ex.syndrome & 0xffff) as u16;
                 if imm == HVC_IRQ_ACK {
                     self.irq_pending = false;
-                    return Ok(None);
+                    return Ok(ExitAction::Continue);
                 }
                 let arg = self.vcpu.get_reg(sys::HV_REG_X0)?;
                 self.dev.step += 1;
@@ -410,14 +452,14 @@ impl Machine {
                         bail!("unknown Rewind HVC #{other:#x} (x0={arg:#x}) at step {}", self.dev.step);
                     }
                 }
-                Ok(Some(imm))
+                Ok(ExitAction::Counted(imm))
             }
             EC_DATA_ABORT_LOWER => {
                 let is_write = (ex.syndrome & (1 << 6)) != 0;
                 let ipa = ex.physical_address;
                 if is_write && self.dirty.handle_write_fault(&self.vm, ipa)? {
                     // Retry the store with write permissions enabled (do not advance PC).
-                    return Ok(None);
+                    return Ok(ExitAction::Continue);
                 }
                 let isv = (ex.syndrome & (1 << 24)) != 0;
                 let srt = ((ex.syndrome >> 16) & 0x1f) as u32;
@@ -439,7 +481,7 @@ impl Machine {
                     self.advance_pc()?;
                     if is_write && port == HVC_IRQ_ACK {
                         self.irq_pending = false;
-                        return Ok(None);
+                        return Ok(ExitAction::Continue);
                     }
                     self.dev.step += 1;
                     self.dev.drain_io(obs)?;
@@ -476,7 +518,7 @@ impl Machine {
                     } else if srt < 31 {
                         self.vcpu.set_reg(srt, 0)?;
                     }
-                    return Ok(Some(port));
+                    return Ok(ExitAction::Counted(port));
                 }
                 // Unmapped MMIO or write to read-only pmem/extras: emulate RAZ/WI and advance PC.
                 if !is_write && isv && srt < 31 {
@@ -485,7 +527,7 @@ impl Machine {
                 self.advance_pc()?;
                 self.dev.step += 1;
                 self.dev.drain_io(obs)?;
-                Ok(Some(MMIO_PORT))
+                Ok(ExitAction::Counted(MMIO_PORT))
             }
             EC_SYS64 => {
                 // Trapped MSR/MRS (e.g., OSLSR_EL1, OSLAR_EL1, LORC_EL1, PMU regs when EL2 is off):
@@ -501,11 +543,70 @@ impl Machine {
                     self.vcpu.set_reg(rt, val)?;
                 }
                 self.advance_pc()?;
-                Ok(None)
+                Ok(ExitAction::Continue)
             }
             EC_WFX => {
                 self.advance_pc()?;
-                Ok(None)
+                Ok(ExitAction::Continue)
+            }
+            EC_HW_BP_LOWER => {
+                let pc = self.vcpu.get_reg(sys::HV_REG_PC)?;
+                Ok(ExitAction::Debug(DebugStop::Breakpoint(pc)))
+            }
+            EC_BRK64 => {
+                let pc = self.vcpu.get_reg(sys::HV_REG_PC)?;
+                let ours = self.translate_active(pc)?.is_some_and(|(pa, _)| {
+                    self.int3s.replaced.contains_key(&pa) && self.int3s.lifted != Some(pa)
+                });
+                if ours {
+                    Ok(ExitAction::Debug(DebugStop::Breakpoint(pc)))
+                } else {
+                    self.reinject_brk_el1(ex.syndrome)?;
+                    Ok(ExitAction::Continue)
+                }
+            }
+            EC_WATCHPOINT_LOWER => {
+                let far = ex.virtual_address;
+                let traps = self.debugging.as_ref().map_or(&[][..], |d| &d.traps);
+                let (address, hit_set) = match_watchpoints(far, traps)
+                    .unwrap_or_else(|| (far, TrapSet::default()));
+                // ARM64 watchpoints abort *before* the access commits; step the
+                // watched instruction once with watchpoints suppressed so the
+                // write lands in RAM and PC advances, matching x86 semantics.
+                self.watching_step = Some((address, hit_set));
+                self.apply_guest_debug()?;
+                Ok(ExitAction::Continue)
+            }
+            EC_SW_STEP_LOWER => {
+                if self.passing_breakpoint {
+                    self.finish_pass_breakpoint()?;
+                    if self
+                        .debugging
+                        .as_ref()
+                        .is_some_and(|d| d.stepping == Stepping::Yes)
+                    {
+                        return Ok(ExitAction::Debug(DebugStop::Step));
+                    }
+                    return Ok(ExitAction::Continue);
+                }
+                if let Some((address, traps)) = self.watching_step.take() {
+                    self.apply_guest_debug()?;
+                    return Ok(ExitAction::Debug(DebugStop::Watchpoint { address, traps }));
+                }
+                if self
+                    .debugging
+                    .as_ref()
+                    .is_some_and(|d| d.stepping == Stepping::Yes)
+                {
+                    return Ok(ExitAction::Debug(DebugStop::Step));
+                }
+                // Stray single-step: clear SS bits and continue.
+                let mdscr = self.vcpu.get_sys_reg(sys::HV_SYS_REG_MDSCR_EL1)?;
+                self.vcpu
+                    .set_sys_reg(sys::HV_SYS_REG_MDSCR_EL1, mdscr & !MDSCR_SS)?;
+                let cpsr = self.vcpu.get_reg(sys::HV_REG_CPSR)?;
+                self.vcpu.set_reg(sys::HV_REG_CPSR, cpsr & !PSTATE_SS)?;
+                Ok(ExitAction::Continue)
             }
             other => {
                 let pc = self.vcpu.get_reg(sys::HV_REG_PC)?;
@@ -823,5 +924,111 @@ mod tests {
             Outcome::Stopped(Stop::Guest(pv::GuestExit::PowerOff))
         );
         assert_eq!(obs.0, b"M");
+    }
+
+    #[test]
+    fn hvf_hardware_and_software_debugging() {
+        use crate::debug::{Access, DebugStop, Stepping, Trap};
+
+        if crate::hvf::kvm::open().is_err() {
+            eprintln!("skipped: Hypervisor.framework entitlement not present on test binary");
+            return;
+        }
+        let mut m = Machine::create(&test_config(), DirtyLog::On).unwrap();
+        // ARM64 program at RAM_BASE + 0x20000:
+        //  +0x00: movz x1, #0x4000, lsl #16   ; x1 = RAM_BASE
+        //  +0x04: add  x1, x1, #2, lsl #12    ; x1 = RAM_BASE + 0x2000 (watched addr)
+        //  +0x08: movz x2, #0x55              ; <-- HW breakpoint
+        //  +0x0c: str  x2, [x1]               ; <-- HW write watchpoint (writes 0x55)
+        //  +0x10: movz x0, #'D'               ; <-- SW BRK #0 breakpoint
+        //  +0x14: hvc  #0x3f8                 ; HVC_SERIAL
+        //  +0x18: movz x0, #0
+        //  +0x1c: hvc  #0x5f4                 ; HVC_EXIT (PowerOff)
+        let code: [u32; 8] = [
+            0xd2a8_0001,
+            0x9140_0821,
+            0xd280_0aa2,
+            0xf900_0022,
+            0xd280_0880,
+            0xd400_0002 | (u32::from(HVC_SERIAL) << 5),
+            0xd280_0000,
+            0xd400_0002 | (u32::from(HVC_EXIT) << 5),
+        ];
+        let entry_off = 0x20000u64;
+        let entry_pc = RAM_BASE + entry_off;
+        for (i, insn) in code.iter().enumerate() {
+            m.dev
+                .ram
+                .write(entry_off + (i * 4) as u64, &insn.to_le_bytes())
+                .unwrap();
+        }
+        crate::hvf::cpu::setup_boot_vcpu(&m.vcpu, entry_pc, 0).unwrap();
+        m.dirty.arm_all(&m.vm).unwrap();
+
+        struct Capture(Vec<u8>);
+        impl Observer for Capture {
+            fn serial(&mut self, _step: u64, byte: u8) {
+                self.0.push(byte);
+            }
+        }
+        let mut obs = Capture(Vec::new());
+
+        // 1. Single-step two instructions.
+        m.set_debug(Stepping::Yes, &[]).unwrap();
+        assert_eq!(m.run(None, &mut obs).unwrap(), Outcome::Debug(DebugStop::Step));
+        assert_eq!(m.arm64_registers().unwrap().pc, entry_pc + 4);
+        assert_eq!(m.run(None, &mut obs).unwrap(), Outcome::Debug(DebugStop::Step));
+        assert_eq!(m.arm64_registers().unwrap().pc, entry_pc + 8);
+        assert_eq!(m.arm64_registers().unwrap().x[1], RAM_BASE + 0x2000);
+
+        // 2. Hardware breakpoint at +0x08, hardware write watchpoint at RAM_BASE + 0x2000,
+        //    and software BRK #0 breakpoint at +0x10.
+        let watch_addr = RAM_BASE + 0x2000;
+        let sw_bp_addr = entry_pc + 0x10;
+        m.insert_int3(sw_bp_addr).unwrap();
+        // Memory read must shadow BRK #0 and return original instruction bytes.
+        let mut read_back = [0u8; 4];
+        assert_eq!(m.read_virtual(sw_bp_addr, &mut read_back).unwrap(), 4);
+        assert_eq!(read_back, code[4].to_le_bytes());
+
+        let traps = [
+            Trap::Execute(entry_pc + 8),
+            Trap::Watch {
+                address: watch_addr,
+                len: 8,
+                access: Access::Write,
+            },
+        ];
+        m.set_debug(Stepping::No, &traps).unwrap();
+        assert_eq!(
+            m.run(None, &mut obs).unwrap(),
+            Outcome::Debug(DebugStop::Breakpoint(entry_pc + 8))
+        );
+
+        // Pass the HW breakpoint and hit the HW write watchpoint (with write already committed!).
+        m.pass_breakpoint().unwrap();
+        match m.run(None, &mut obs).unwrap() {
+            Outcome::Debug(DebugStop::Watchpoint { address, traps }) => {
+                assert_eq!(address, watch_addr);
+                assert!(traps.contains(1));
+            }
+            other => panic!("expected Watchpoint, got {other:?}"),
+        }
+        assert_eq!(m.arm64_registers().unwrap().pc, sw_bp_addr);
+        let mut mem = [0u8; 8];
+        m.read_physical(watch_addr, &mut mem).unwrap();
+        assert_eq!(u64::from_le_bytes(mem), 0x55);
+
+        // 3. Continue into software BRK #0 breakpoint at +0x10, then pass it and run to PowerOff.
+        assert_eq!(
+            m.run(None, &mut obs).unwrap(),
+            Outcome::Debug(DebugStop::Breakpoint(sw_bp_addr))
+        );
+        m.pass_breakpoint().unwrap();
+        assert_eq!(
+            m.run(None, &mut obs).unwrap(),
+            Outcome::Stopped(Stop::Guest(pv::GuestExit::PowerOff))
+        );
+        assert_eq!(obs.0, b"D");
     }
 }
